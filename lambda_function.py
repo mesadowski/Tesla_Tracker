@@ -1,53 +1,74 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Created on Mon Jan 18 19:08:43 2021
-@author: michaelsadowski
-"""
-import myTesla
-import os
-import boto3
-from datetime import datetime
-import uuid
 
+import json
+#import sqlite3
+from datetime import datetime
+import boto3
+import uuid
+import os
+
+import teslapy
 
 EMAIL = os.environ['EMAIL']
-PASSWORD = os.environ['PASSWORD']
 
-def lambda_handler(event,context):
-    
-    my_car = myTesla.connect(EMAIL, PASSWORD)
-    charge_state = my_car.charge_state()
-    vehicle_state = my_car.vehicle_state()
-    climate_state = my_car.climate_state()
-    drive_state = my_car.drive_state()
-    
-    if ('error' in vehicle_state):
-        print (vehicle_state['error'])
-    else:
-        battery_level = charge_state['response']['usable_battery_level']
-        lat = drive_state['response']['latitude']
-        long = drive_state['response']['longitude']
-        heading = drive_state['response']['heading']
-        speed = drive_state['response']['speed']
-        power = drive_state['response']['power']
-        locked = vehicle_state['response']['locked']
-        odometer = vehicle_state['response']['odometer']
-        climate_on = climate_state['response']['is_climate_on']
-        inside_temp = climate_state['response']['inside_temp']
-        outside_temp = climate_state['response']['outside_temp']
+def parameter_store_load():   # Get the tokens and other params from AWS Parameter Store
+    ssm_client = boto3.client('ssm', region_name='us-east-1')    
+    param = ssm_client.get_parameter(
+            Name='My_Tesla_Parameters',
+            WithDecryption=True
+            )
+    cache = param['Parameter']['Value']
+    cache_json = json.loads(cache)
+    return cache_json
 
+def parameter_store_save(cache):    # Save the tokens and other params in AWS Parameter Store
+    ssm_client = boto3.client('ssm', region_name='us-east-1')
+    str_json = json.dumps(cache)
+    response = ssm_client.put_parameter(
+        Name='My_Tesla_Parameters',
+        Value = str_json,
+        Type='SecureString',
+        Overwrite=True   
+        )
+    return
+    
+def main():
+    
+    try:   
+        tesla = teslapy.Tesla(EMAIL, cache_loader=parameter_store_load, cache_dumper=parameter_store_save)
+        
+        vehicles = tesla.vehicle_list()
+        #vehicles[0].sync_wake_up()   # Wake up the car. Comment out to avoid battery drain
+        print(vehicles[0])
+        
+        cardata = vehicles[0].get_vehicle_data()
+          
+        battery_level = cardata['charge_state']['usable_battery_level']
+        charge_added = cardata['charge_state']['charge_energy_added']
+        lat = cardata['drive_state']['latitude']
+        long = cardata['drive_state']['longitude']
+        heading = cardata['drive_state']['heading']
+        speed = cardata['drive_state']['speed']
+        power = cardata['drive_state']['power']
+        locked = cardata['vehicle_state']['locked']
+        odometer = cardata['vehicle_state']['odometer']
+        climate_on = cardata['climate_state']['is_climate_on']
+        inside_temp = cardata['climate_state']['inside_temp']
+        outside_temp = cardata['climate_state']['outside_temp']
+        
         recordID = str(uuid.uuid4()) #generate a unique record ID
         dt = datetime.now()
-
-        #Create record in DynamoDB table
-        dynamodb = boto3.resource('dynamodb')
-        table = dynamodb.Table(os.environ['DB_TABLE_NAME'])
-        table.put_item(
-            Item={
+        
+        #Create record in the DynamoDB table
+        dynamodb = boto3.resource('dynamodb',region_name='us-east-1')
+        table = dynamodb.Table(os.environ['DB_TABLE_NAME'])  # Get the table name from the Lamda environment
+        table.put_item(Item=
+                {
                 'Record_ID' : recordID,
                 'DateTime' : str(dt),
                 'battery_level' : battery_level,
+                'charge_added' : str(charge_added),
                 'lat' : str(lat),
                 'long' : str(long),
                 'heading' : str(heading),
@@ -58,6 +79,14 @@ def lambda_handler(event,context):
                 'climate_on' : climate_on,
                 'inside_temp' : str(inside_temp),
                 'outside_temp' : str(outside_temp)
-                }
-            )
+                })
         
+        print(battery_level)  # print something for debug purposes
+        
+    except teslapy.HTTPError as e:
+        print(e)
+        
+    return
+
+def lambda_handler(event,context):    
+    main()
